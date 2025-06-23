@@ -31,8 +31,8 @@ class Model(Serializable):
     """
     H0 : Complex[QArray, "... hilbert_dim hilbert_dim"]
     H1 : Complex[QArray, "... hilbert_dim hilbert_dim"]
-    omega_d_values : Float[Array, "num_amps num_omega_ds"]
-    drive_amplitudes : Float[Array, "num_amps"]
+    omega_d_values : Float[Array, "num_omega_ds"]
+    drive_amplitudes : Float[Array, "num_omega_ds num_amps"]
     hilbert_dim : Float
 
     def __init__(
@@ -74,7 +74,7 @@ class Model(Serializable):
         """Return index corresponding to omega_d value."""
         return jnp.argmin(jnp.abs(self.omega_d_values - omega_d))
 
-    def amp_to_idx(self, amp: float, omega_d: float,
+    def amp_to_idx(self, omega_d: float, amp: float,
         ) -> Float[Array, "num_omega_ds num_amps"]:
         """Return index corresponding to amplitude value.
 
@@ -82,7 +82,7 @@ class Model(Serializable):
         the drive frequency here.
         """
         omega_d_idx = self.omega_d_to_idx(omega_d)
-        return jnp.argmin(jnp.abs(self.drive_amplitudes[:, omega_d_idx] - amp))
+        return jnp.argmin(jnp.abs(self.drive_amplitudes[omega_d_idx, :] - amp))
 
     def hamiltonian(
         self, 

@@ -41,6 +41,7 @@ class Options(Serializable):
         nsteps: int = 30_000,
         num_cpus: int = 1,
         save_floquet_modes: bool = False,
+        track: bool = False
     ):
         self.fit_range_fraction = fit_range_fraction
         self.floquet_sampling_time_fraction = floquet_sampling_time_fraction
@@ -49,3 +50,4 @@ class Options(Serializable):
         self.nsteps = nsteps
         self.num_cpus = num_cpus
         self.save_floquet_modes = save_floquet_modes
+        self.track = track
