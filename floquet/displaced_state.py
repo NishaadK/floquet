@@ -3,7 +3,7 @@ from __future__ import annotations
 from jax import Array, vmap, jit
 import jax.numpy as jnp
 import jax.tree_util as jtu
-import jax.lax.cond as jcond
+from jax.lax import cond as jcond
 
 import dynamiqs as dq
 from dynamiqs import QArray
@@ -39,6 +39,8 @@ class DisplacedState:
     fit_cutoff_omega_d : int
     fit_cutoff_amp : int
     overlap_cutoff : float
+    model: Model
+    options: Options
 
     def __init__(
         self, model: Model, state_indices: List[int], options: Options
@@ -50,19 +52,22 @@ class DisplacedState:
         #self.omega_d_values = model.omega_d_values
         #self.drive_amplitudes = model.drive_amplitudes
 
+        self.model = model
+        self.options = options
+
         self.fit_cutoff = self.options.fit_cutoff
         self.fit_cutoff_omega_d = min(model.omega_d_values.shape[-1], self.options.fit_cutoff)
         self.fit_cutoff_amp = min(model.drive_amplitudes.shape[-1], self.options.fit_cutoff)
         self.overlap_cutoff =  self.options.overlap_cutoff
 
+
         self.exponent_pair = self._create_exponent_pair()
 
     def displaced_states(
         self, 
-        omega_ds: Float[Array, "num_omega_ds"],
-        amps: Float[Array, "num_omega_ds num_amps"],
-        coefficients: Complex[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"],
-        *,
+        coefficients: Complex[Array, "num_state_indices hilbert_dim num_fit_terms"],
+        omega_ds: Float[Array, "num_omega_ds"] = None,
+        amps: Float[Array, "num_omega_ds num_amps"] = None,
         state_indices: List[int] = None, 
         bare_same_override: Bool = False,
     ) -> Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"]:
@@ -88,22 +93,27 @@ class DisplacedState:
         Returns:
             The displaced state(s). Shape: (num_state_indices, num_omega_ds, num_amps, hilbert_dim, 1). Careful, that the first index is the array index, not the state index! For example, if state_indices = [0, 2], then result[0, ...] is the displaced state for state index 0, and result[1, ...] is the displaced state for state index 2.
         """
-        if state_indices is None:
-            state_indices = self.state_indices
+        
+        if omega_ds is None: omega_ds = self.model.omega_d_values
+        if amps is None: amps = self.model.drive_amplitudes
+        if state_indices is None: state_indices = self.state_indices
+
+
+        coefficients = coefficients[state_indices] 
 
         _vmap_displaced_state = vmap(DisplacedState._one_displaced_state, 
-                                    in_axes=(None, None, -5, -1, None, None), out_axes=0)
-        return _vmap_displaced_state(omega_ds, amps, coefficients, state_indices, 
-                                     self.exponent_pair, bare_same_override)
+                                    in_axes=(None, None, -3, -1, None), out_axes=0)
+        return _vmap_displaced_state(omega_ds, amps, 
+                                     coefficients, state_indices, self.exponent_pair, bare_same_override)
 
     @staticmethod
     @jit
     def _one_displaced_state( 
         omega_ds: Float[Array, "num_omega_ds"],
         amps: Float[Array, "num_omega_ds num_amps"],
-        coefficients: Complex[Array, "hilbert_dim num_omega_ds num_amps num_fit_terms"],
+        coefficients: Complex[Array, "hilbert_dim num_fit_terms"],
         state_idx: int, 
-        exponent_pair: Int[Array, "2 num_fit_terms"],
+        exponent_pair: Int[Array, "num_fit_terms 2"],
         bare_same_override: Bool = False,
     ) -> Complex[QArray, "num_omega_ds num_amps hilbert_dim 1"]:
         '''Constructs entire displaced state (with dimension `hilbert_dim`) by computing
@@ -111,7 +121,7 @@ class DisplacedState:
         value for a particular basis vector, then vectorizing this over all basis vectors.
         '''
 
-        hilbert_dim = coefficients.shape[-4]
+        hilbert_dim = coefficients.shape[-2]
 
         # Set vec_bare_same based on bare_same_override
         # If bare_same_override is true, return a vector of all False
@@ -124,7 +134,7 @@ class DisplacedState:
 
         # Simply vectorize _compute_polynomial the basis vectors! Isn't that so cool? :)
         _vmap_compute_polynomial = vmap(DisplacedState._compute_polynomial,
-                                       in_axes=(None, None, -4, None, -1), out_axes=-1)
+                                       in_axes=(None, None, -2, None, -1), out_axes=-1)
 
         # Vectorized function returns shape: (hilbert_dim, num_omega_ds, num_amps, hilbert_dim). 
         result = _vmap_compute_polynomial(omega_ds, amps, coefficients, exponent_pair, 
@@ -138,8 +148,8 @@ class DisplacedState:
     def _compute_polynomial(
         omega_ds: Float[Array, "num_omega_ds"],
         amps: Float[Array, "num_omega_ds num_amps"],
-        coefficients: Complex[Array, "num_omega_ds num_amps num_fit_terms"],
-        exponent_pair: Int[Array, "2 num_fit_terms"],
+        coefficients: Complex[Array, "num_fit_terms"],
+        exponent_pair_map: Int[Array, "num_fit_terms 2"],
         bare_same: Bool,
     ) -> Complex[Array, "num_omega_ds num_amps"]:
         '''Using an array of existing Cijkl coefficients for a particular basis vector, 
@@ -154,14 +164,14 @@ class DisplacedState:
         # Cartesian vmap (vmap in reverse order)
         _cvmap_poly_term = vmap(vmap(vmap(_poly_term,
                in_axes=(None,None,-1), out_axes=0), # vmap over exponents
-               in_axes=(None,-1,None), out_axes=0), # vmap over amp  
+               in_axes=(None,-1,None), out_axes=0), # vmap over amps  
                in_axes=(-1,-2,None),   out_axes=0)  # vmap over omega_d
 
         # Get all the terms i.e. omega_d^k * amp^l, shape: (num_omega_ds, num_amps, num_fit_terms)
-        all_poly_terms = _cvmap_poly_term(omega_ds, amps, exponent_pair)
+        all_poly_terms = _cvmap_poly_term(omega_ds, amps, exponent_pair_map)
 
-        # NOTE: coefficients.shape=(num_omega_ds, num_amps, num_fit_terms).
-        # This isn't explicitly validated. 
+        # NOTE: coefficients.shape=(num_fit_terms). This isn't explicitly validated. 
+        coefficients = jnp.broadcast_to(coefficients, all_poly_terms.shape) # now its (num_omega_ds, num_amps, num_fit_terms)
         result = jnp.nansum(coefficients * all_poly_terms, axis = -1)
         return jcond(bare_same, lambda: 1.0 + result, lambda: result)
 
@@ -197,26 +207,36 @@ class DisplacedState:
         return idx_exp_map[sorted_idxs].T # shape = (2,num_fit_terms)
 
     @jit 
-    def _bare_coeffs(self, num_omega_ds: int, num_amps: int
-        ) -> Complex[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"]:
+    def _bare_coeffs(self) -> Complex[Array, "num_state_indices hilbert_dim num_fit_terms"]:
 
         return jnp.zeros((len(self.state_indices),     
-                                 self.hilbert_dim,            
-                                 num_omega_ds,
-                                 num_amps,          
-                                 self.exponent_pair.shape[1],
-                               ), dtype=complex)
+                                self.hilbert_dim,            
+                                self.exponent_pair.shape[1]), dtype=complex)
         
     
     @jit
-    def bare_states(self, num_omega_ds: int, num_amps: int
-        ) -> Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"]:
-        
-        bare = jtu.Partial(DisplacedState.displaced_states, coefficients=self._bare_coeffs,
-                           state_indices=self.state_indices, bare_same_override=False)
-        
-        return bare(jnp.zeros(num_omega_ds), jnp.zeros((num_omega_ds, num_amps)))
+    def bare_states(self) -> Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim"]:
+
+        return jnp.squeeze(self.displaced_states(self.model.omega_d_values, 
+                            self.model.drive_amplitudes, coefficients=self._bare_coeffs))
     
+
+    @jit 
+    def overlap_with_displaced_states(self, amp_idxs: list, coefficients: Complex[Array, "num_state_indices hilbert_dim num_fit_terms"],
+                                     ordered_floquet_modes: Complex[QArray, "num_omega_ds num_amps hilbert_dim hilbert_dim"]):
+        
+
+        amps_to_use = self.model.drive_amplitudes[:, amp_idxs[0]:amp_idxs[1]]
+        disp_states = jnp.squeeze(self.displaced_states(coefficients, amps=amps_to_use))
+        disp_states = jnp.transpose(disp_states, (1, 2, 0, 3))
+        floquet_modes = ordered_floquet_modes[self.state_indices]
+
+        disp_states = jnp.expand_dims(disp_states, )
+
+        multi_overlap = vmap(vmap(overlap, in_axes=(-3, -3)), in_axes=(-4, -4))
+        overlaps = multi_overlap(disp_states, floquet_modes)
+
+
 
 class DisplacedStateFit(DisplacedState):
     """Methods for fitting an ideal displaced state to calculated Floquet modes."""
@@ -225,8 +245,9 @@ class DisplacedStateFit(DisplacedState):
         self,
         omega_ds: Float[Array, 'num_omega_ds'],
         amps: Float[Array, 'num_omega_ds num_amps'],
-        floquet_modes: Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"],
-    ) -> Complex[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"]:
+        overlaps_to_judge: Float[Array, 'num_state_indices, num_omega_ds, num_amps, hilbert_dim'],
+        floquet_modes: Complex[QArray, "num_omega_ds num_amps hilbert_dim hilbert_dim"],
+    ) -> Complex[Array, "num_state_indices hilbert_dim num_fit_terms"]:
         """Fit the coefficients for the displaced states corresponding to self.state_indices. 
         
         We ignore the floquet modes where we suspect a transition. These are the points where the overlap of the floquet mode with the bare states falls below the threshold (specified in options).
@@ -234,14 +255,14 @@ class DisplacedStateFit(DisplacedState):
         Parameters:
             omega_ds: Drive frequency. Shape: (num_omega_ds,)
             amps: Drive amplitude. Shape: (num_omega_ds, num_amps)
-            floquet_modes: Floquet modes. Shape: (num_state_indices num_omega_ds num_amps hilbert_dim 1)
+            floquet_modes: Floquet modes. Shape: (num_omega_ds num_amps hilbert_dim hilbert_dim 1)
 
         Returns:
             Optimized fit coefficients. Shape: (num_state_indices, hilbert_dim, num_omega_ds, num_amps, num_fit_terms).
         """
-        num_fit_terms = self.exponent_pair.shape[-1]
+        num_fit_terms = self.exponent_pair.shape[-2]
         freq_amp_shape = amps.shape
-        zero_coeffs = self._bare_coeffs(*freq_amp_shape)
+        zero_coeffs = self._bare_coeffs()
 
         # Do we have enough points to fit? 
         # This isn't JAX-friendly. However, ideally this function is run just once. 
@@ -251,13 +272,17 @@ class DisplacedStateFit(DisplacedState):
         
         # Compute overlap with bare states. These are simply displaced states with zero coeffs. 
         # The constant = 1 is taken care of by bare_same
-        # overlap_with_bare_states.shape = (num_state_indices, num_omega_ds, num_amps)
-        bare_states = self.bare_states(*freq_amp_shape)
-        overlap_with_bare_states = overlap(bare_states, floquet_modes)
+        # overlap_with_bare_states.shape = (num_state_indices, num_omega_ds, num_amps, hilbert_dim)
+        # bare_states_reshaped = jnp.transpose(self.bare_states(freq_amp_shape), (1, 2, 0, 3)) # dim = (num_omega_ds, num_amps, num_state_indices, hilbert_dim)
+        # multi_overlap = vmap(vmap(overlap, in_axes=(-3, None)), in_axes=(-4, None))
+        # overlap_with_bare_states = multi_overlap(bare_states_reshaped, floquet_modes) # dim = (num_omega_ds, num_amps, num_state_indices, hilbert_dim)
+        # overlap_with_bare_states = jnp.transpose(overlap_with_bare_states, (2, 0, 1, 3)) # dim = (num_state_indices, num_omega_ds, num_amps, hilbert_dim)
+
+        # overlap_with_bare_states = jnp.transpose(floquet_modes, (2, 0, 1, 3))[self.state_indices]
 
         # Only fit states that we think haven't run into a transition
         # mask.shape =(..., num_state_indices, num_omega_ds, num_amps). 
-        mask = (overlap_with_bare_states > self.overlap_cutoff)
+        mask = (overlaps_to_judge > self.overlap_cutoff)
 
         # Tile omega_ds and amps to match the shape of mask
         tiled_omega_ds = jnp.tile(omega_ds[None, :, None], (mask.shape[-3], 1, mask.shape[-1]))
@@ -332,4 +357,4 @@ class DisplacedStateFit(DisplacedState):
             solution.result == RESULTS.successful,
             lambda: solution.value,
             lambda: jnp.zeros_like(init_coefficients),
-        )
+        )                               

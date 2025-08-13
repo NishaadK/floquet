@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from scipy.optimize import linear_sum_assignment
 import dynamiqs as dq
+import numpy as np
 # overlaps = jnp.array([[0.9, 0.1, 0, 0], [0.1, 0.9, 0, 0], [0, 0, 0.5, 0.5], [0, 0, 0.6, 0.4]])
 # row_ind, col_ind = linear_sum_assignment(-overlaps)
 # print(row_ind, col_ind)
@@ -36,7 +37,34 @@ import dynamiqs as dq
 # c = [2, 3, 4, 5]
 # print(c[2:4])
 
-d = (10, 5)
-f = jnp.stack(jnp.meshgrid(jnp.arange(d[0]), jnp.arange(d[1])), axis=2)
-f = jnp.transpose(f, (1, 0, 2))
-print(f)
+# d = (10, 5)
+# f = jnp.stack(jnp.meshgrid(jnp.arange(d[0]), jnp.arange(d[1])), axis=2)
+# f = jnp.transpose(f, (1, 0, 2))
+# print(f)
+
+# a = jnp.array([1, 2])
+# b = jnp.array([2, 4])
+
+# print(jnp.einsum('ij, kj -> ik', a, b))
+
+omega_d_idxs = jnp.arange(5)
+amp_idxs = jnp.arange(10)
+# omega_d_amp_idx_grid = jnp.stack(jnp.meshgrid(omega_d_idxs, amp_idxs), axis=-1)
+# omega_d_amp_idx_grid = jnp.transpose(omega_d_amp_idx_grid, (1, 0, 2))
+# print(omega_d_amp_idx_grid)
+
+freq_amp_shape = (5, 10)
+fit_range_fraction = 0.4
+num_fit_ranges = int(jnp.ceil(1 / fit_range_fraction))
+num_amp_pts_per_range = int(jnp.floor(freq_amp_shape[-1] / num_fit_ranges)
+)
+
+omega_idx_set = jnp.array([0, freq_amp_shape[-2]])
+amp_idx_set = jnp.array([jnp.array([i*num_amp_pts_per_range, int(jnp.min(jnp.array([(i+1) * num_amp_pts_per_range, 10])))])
+                for i in range(num_fit_ranges + 1)])
+# amp_idx_set = [[i*num_amp_pts_per_range, jnp.min((i+1) * num_amp_pts_per_range, freq_amp_shape[-1])] 
+#                 for i in range(num_fit_ranges)]
+
+print(jnp.stack([jnp.repeat(omega_idx_set[None, :], amp_idx_set.shape[0], axis=0), amp_idx_set], axis=1))
+
+# print(jnp.meshgrid(jnp.array(omega_idx_set), jnp.array(amp_idx_set)))
