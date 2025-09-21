@@ -8,17 +8,17 @@ os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=true --xla_cpu_multi_thr
 
 import jax.numpy as jnp
 import jax.tree_util as jtu
-from jax.lax import cond as jcond, scan as jscan
+from jax.lax import cond as jcond, scan as jscan, dynamic_update_slice as dynamic_update, dynamic_slice
 
 from jaxtyping import Complex, Float
 from typing import List
-
+from functools import partial
 
 import numpy as np
 from jax import jit, vmap, Array
 from dynamiqs import floquet as dq_floquet, QArray, TimeQArray
 from dynamiqs.method import Tsit5
-from dynamiqs.utils import Options as DqOptions
+# from dynamiqs.utils import Options as DqOptions
 
 from .displaced_state import DisplacedState, DisplacedStateFit
 from .model import Model
@@ -63,8 +63,8 @@ class FloquetAnalysis(Serializable):
         return "Running floquet simulation with parameters: \n" + super().__str__()
     
 
-    @jit
-    def run_one_floquet(self, omega_d_amp: tuple[float, float]) -> tuple[QArray, QArray]:
+    # @jit
+    def run_one_floquet(self, omega_d: float, amp: float) -> tuple[QArray, QArray]:
         """Run one instance of the problem for a pair of drive frequency and amp.
 
         Returns Floquet modes and quasienergies.
@@ -72,51 +72,53 @@ class FloquetAnalysis(Serializable):
         Parameters:
             omega_d_amp: Pair of drive frequency and amp.
         """
-        omega_d, amp = omega_d_amp
+        # omega_d, amp = omega_d_amp
         T = 2.0 * jnp.pi / omega_d
         tsave = jnp.linspace(0.0, T, 101)  # Example: 101 time points
         H = self.model.hamiltonian(omega_d, amp)
-        result = dq_floquet(H, T, tsave, method=Tsit5(), options=DqOptions())
-        return result.modes, jnp.real(result.quasienergies)
+        result = dq_floquet(H, T, tsave, method=Tsit5())#, options=DqOptions())
+        final_t_modes =  jnp.squeeze(dq.to_jax(result.modes[..., -1, :, :, :]))
+        final_energies = jnp.real(result.quasienergies)
+        return final_t_modes, final_energies
     
 
     # for this step we want to be able to reconstruct polynomial at a single amp-freq cooridnate.
     # this means getting the value of the displaced state only there, its computationally unnecessary to write the whole thing over all freqs and amps
     # currently displaced-state.py jumps the gun on this
     
-    @jit
-    def identify_floquet_modes(
-        self,
-        f_modes_energies: tuple[QArray, QArray],
-        params_0: tuple[float, float],
-        displaced_state: DisplacedState,
-        prev_coeffs: QArray,
-    ) -> QArray:
-        """Return Floquet modes with largest overlap with ideal displaced state.
-        Vectorized over all state indices.
+    # @jit
+    # def identify_floquet_modes(
+    #     self,
+    #     f_modes_energies: tuple[QArray, QArray],
+    #     params_0: tuple[float, float],
+    #     displaced_state: DisplacedState,
+    #     prev_coeffs: QArray,
+    # ) -> QArray:
+    #     """Return Floquet modes with largest overlap with ideal displaced state.
+    #     Vectorized over all state indices.
 
-        Parameters:
-            f_modes_energies: Output of self.run_one_floquet(params)
-            params_0: (omega_d_0, amp_0) to use for displaced fit
-            displaced_state: Instance of DisplacedState
-            prev_coeffs: Coefficients from the previous amplitude range
-        """
-        f_modes_0, _ = f_modes_energies
+    #     Parameters:
+    #         f_modes_energies: Output of self.run_one_floquet(params)
+    #         params_0: (omega_d_0, amp_0) to use for displaced fit
+    #         displaced_state: Instance of DisplacedState
+    #         prev_coeffs: Coefficients from the previous amplitude range
+    #     """
+    #     f_modes_0, _ = f_modes_energies
 
-        disp_states = displaced_state.displaced_states(*params_0, prev_coeffs, 
-                                                            state_indices=self.state_indices,
-                                                            bare_same_override=False)
+    #     disp_states = displaced_state.displaced_states(*params_0, prev_coeffs, 
+    #                                                         state_indices=self.state_indices,
+    #                                                         bare_same_override=False)
 
-        # assign_states_batched = vmap(assign_states, in_axes=0)
+    #     # assign_states_batched = vmap(assign_states, in_axes=0)
 
-        # could probably just rewrite this with argmax since you only care about 1 entry
-        # MWPM probably takes way too long to do this. remember to test it
-        # maxing_idxs = assign_states_batched(overlap_batched(disp_states, f_modes_0))[:, 0]
-        overlap_mats = vmap(overlap, in_axes=(0, 2))(disp_states, f_modes_0)
-        maxing_idxs = jnp.argmax(overlap_mats, axis=-1)
+    #     # could probably just rewrite this with argmax since you only care about 1 entry
+    #     # MWPM probably takes way too long to do this. remember to test it
+    #     # maxing_idxs = assign_states_batched(overlap_batched(disp_states, f_modes_0))[:, 0]
+    #     overlap_mats = vmap(overlap, in_axes=(0, 2))(disp_states, f_modes_0)
+    #     maxing_idxs = jnp.argmax(overlap_mats, axis=-1)
 
-        # this also does not guarantee that the list of indices is single-valued
-        return f_modes_0[maxing_idxs]
+    #     # this also does not guarantee that the list of indices is single-valued
+    #     return f_modes_0[maxing_idxs]
     
 
     # @jit
@@ -142,12 +144,12 @@ class FloquetAnalysis(Serializable):
 
     #     return assign_states(overlap(prev_f_modes, f_modes_0))
     
-    @jit
+    # @jit
     def _step_in_amp(
-        self, f_modes_energies: tuple[QArray, QArray], prev_f_modes: QArray, 
+        self, f_modes_0: QArray, f_energies_0: QArray, prev_f_modes: QArray, 
     ) -> tuple[Array, Array, QArray]:
         
-        f_modes_0, f_energies_0 = f_modes_energies
+        # f_modes_0, f_energies_0 = f_modes_energies
         # operands = (f_modes_0, prev_f_modes)
         
         # def _track_overlap(curr_modes, prev_modes):
@@ -159,13 +161,14 @@ class FloquetAnalysis(Serializable):
         # max_idxs = jcond(self.options.track, _track_overlap, _mode_overlap, *operands)
 
         max_idxs = assign_states(overlap(prev_f_modes, f_modes_0))
+        print(max_idxs)
         f_modes_ordered = f_modes_0[max_idxs]
         nbar = self._calculate_mean_excitation(f_modes_ordered)
 
         return nbar, f_energies_0[max_idxs], f_modes_ordered
     
 
-    @jit
+    # @jit
     def _calculate_mean_excitation(self, f_modes_ordered: Array) -> Array:
         """Mean excitation number of ordered floquet modes.
 
@@ -177,47 +180,60 @@ class FloquetAnalysis(Serializable):
         nbar = jnp.einsum("ik,k->i", bare_overlaps_sq, jnp.arange(self.hilbert_dim))
         return jnp.real(nbar) 
     
-    @jit 
-    def _floquet_main_for_amp_range(
-        self,
-        omega_d: float,
-        amp_idxs: list,
-        displaced_state: DisplacedState,
-        prev_coeffs: QArray,
-        prev_f_modes: QArray,
-    ) -> tuple:
-        """Run the Floquet simulation over a specific amplitude range."""
+    # @jit 
+    # def _floquet_main_for_amp_range(
+    #     self,
+    #     omega_d: float,
+    #     amp_idxs: list,
+    #     displaced_state: DisplacedState,
+    #     prev_coeffs: QArray,
+    #     prev_f_modes: QArray,
+    # ) -> tuple:
+    #     """Run the Floquet simulation over a specific amplitude range."""
 
-        omega_d_idx = self.model.omega_d_to_idx(omega_d)
-        chosen_amps = self.model.drive_amplitudes[omega_d_idx, amp_idxs[0] : amp_idxs[1]]
+    #     omega_d_idx = self.model.omega_d_to_idx(omega_d)
+    #     chosen_amps = self.model.drive_amplitudes[omega_d_idx, amp_idxs[0] : amp_idxs[1]]
         
 
-        def _run_floquet_and_calculate(omega_d: Float):
-            omega_d_idx = self.model.omega_d_to_idx(omega_d)
-            chosen_amps = self.model.drive_amplitudes[omega_d_idx, amp_idxs[0] : amp_idxs[1]]
+    #     def _run_floquet_and_calculate(omega_d: Float):
+    #         omega_d_idx = self.model.omega_d_to_idx(omega_d)
+    #         chosen_amps = self.model.drive_amplitudes[omega_d_idx, amp_idxs[0] : amp_idxs[1]]
 
 
 
-            for idx, amp in enumerate(chosen_amps):
-                params = (omega_d, amp)
-                f_modes_energies = self.run_one_floquet(params)
+    #         for idx, amp in enumerate(chosen_amps):
+    #             params = (omega_d, amp)
+    #             f_modes_energies = self.run_one_floquet(params)
 
-                f_modes_ds = self.identify_floquet_modes(f_modes_energies, params, 
-                                                         displaced_state, prev_coeffs)
-                nbar, quasienergies, f_modes_ba = self._step_in_amp(f_modes_energies, 
-                                                                    prev_f_modes)
+    #             f_modes_ds = self.identify_floquet_modes(f_modes_energies, params, 
+    #                                                      displaced_state, prev_coeffs)
+    #             nbar, quasienergies, f_modes_ba = self._step_in_amp(f_modes_energies, 
+    #                                                                 prev_f_modes)
                 
+    # @staticmethod       
+    # def reshape_for_slice(array: Array):
+    #     return array.reshape(1, 1, *array.shape), jnp.zeros(len(array.shape))
+
 
     @staticmethod
-    @jit 
+    # @jit 
     def _place_into(
         omega_idxs: list, amp_idxs: list, array_for_range: Array, overall_array: Array
     ) -> Array:
-        overall_array = overall_array.at[omega_idxs[0]: omega_idxs[1], amp_idxs[0] : amp_idxs[1]].set(array_for_range)
-        return overall_array
-                
+        # overall_array = overall_array.at[omega_idxs[0]: omega_idxs[1], amp_idxs[0] : amp_idxs[1]].set(array_for_range) # np indexing no longer valid for dynamic array access
 
-    @jit
+    
+        reshaped_arr_for_range = array_for_range.reshape(1, 1, *array_for_range.shape)
+        pad_zeros = jnp.zeros(len(array_for_range.shape), dtype=jnp.int32)
+        slice_indices = (omega_idxs[0], amp_idxs[0], *pad_zeros)
+        # print('the type is here')
+        # print(type(overall_array))
+        # print(type(reshaped_arr_for_range))
+        overall_array = dynamic_update(overall_array, reshaped_arr_for_range, slice_indices)
+        return overall_array
+                 
+
+    # @jit
     def _postprocess_blais(self, prev_f_modes: QArray, 
                            idx_pair: tuple[int, int], 
                             f_modes_energies_arr: QArray, 
@@ -228,8 +244,15 @@ class FloquetAnalysis(Serializable):
         omega_d_idx, amp_idx = idx_pair 
         write_idxs = ([omega_d_idx, omega_d_idx + 1], [amp_idx, amp_idx + 1])
 
-        f_modes_energies = f_modes_energies_arr[omega_d_idx, amp_idx]
-        nbar, quasienergies, f_modes = self._step_in_amp(f_modes_energies, prev_f_modes)
+        f_modes_arr, energies_arr = f_modes_energies_arr
+        # f_modes_energies = f_modes_energies_arr[omega_d_idx, amp_idx]
+        # print('f mode arr shape is')
+        # print(f_modes_arr.shape)
+        # print(f_modes_arr[omega_d_idx, amp_idx].shape)
+        nbar, quasienergies, f_modes = self._step_in_amp(f_modes_arr[omega_d_idx, amp_idx], energies_arr[omega_d_idx, amp_idx], prev_f_modes)
+        # print(f_modes.shape)
+
+
 
         nbar_for_amp_range = self._place_into(*write_idxs, nbar, nbar_for_amp_range)
         quasienergies_for_amp_range = self._place_into(*write_idxs, quasienergies, quasienergies_for_amp_range)
@@ -243,7 +266,7 @@ class FloquetAnalysis(Serializable):
         # floquet_data = vmap(_run_floquet_and_calculate)(self.model.omega_d_values)
         # return floquet_data  # Process as needed
 
-    @jit
+    # @jit
     def _postprocess_disp(self, prev_coeffs: Complex[Array, "num_state_indices hilbert_dim num_fit_terms"], 
                           omega_d_amp_idx_range: Array, 
                           f_modes_arr: QArray, 
@@ -252,12 +275,18 @@ class FloquetAnalysis(Serializable):
                           ):
                 
         omega_d_idx_range, amp_idx_range = omega_d_amp_idx_range
-        omega_ds_to_use = self.model.omega_d_values[omega_d_idx_range[0]: omega_d_idx_range[1]]
-        drive_amps_to_use = self.model.drive_amplitudes[omega_d_idx_range[0]: omega_d_idx_range[1], 
-                                                        amp_idx_range[0]: amp_idx_range[1]]
 
-        f_modes_to_use = f_modes_arr[omega_d_idx_range[0]: omega_d_idx_range[1], 
-                                                        amp_idx_range[0]: amp_idx_range[1]]
+        omega_ds_to_use = dynamic_slice(self.model.omega_d_values, (omega_d_idx_range[0],), (omega_d_idx_range[1] - omega_d_idx_range[0],))
+        drive_amps_to_use = dynamic_slice(self.model.drive_amplitudes, (omega_d_idx_range[0], amp_idx_range[0]), (omega_d_idx_range[1] - omega_d_idx_range[0], amp_idx_range[1] - amp_idx_range[0]))
+        f_modes_to_use = dynamic_slice(f_modes_arr, (omega_d_idx_range[0], amp_idx_range[0], 0, 0), (omega_d_idx_range[1] - omega_d_idx_range[0], amp_idx_range[1] - amp_idx_range[0], *f_modes_arr.shape[-2:]))
+
+
+        # omega_ds_to_use = self.model.omega_d_values[omega_d_idx_range[0]: omega_d_idx_range[1]]
+        # drive_amps_to_use = self.model.drive_amplitudes[omega_d_idx_range[0]: omega_d_idx_range[1], 
+        #                                                 amp_idx_range[0]: amp_idx_range[1]]
+
+        # f_modes_to_use = f_modes_arr[omega_d_idx_range[0]: omega_d_idx_range[1], 
+        #                                                 amp_idx_range[0]: amp_idx_range[1]]
         # f_modes_to_use, _ = f_modes_energies # dim = (num_omega_ds_to_use, num_amps_to_use, hilbert_dim, hilbert_dim)
 
         multi_overlap_1D = vmap(vmap(overlap, in_axes=(-3, None)), in_axes=(-4, None))
@@ -309,11 +338,23 @@ class FloquetAnalysis(Serializable):
         start_time = time.time()
 
         print('Performing Floquet simulations...')
-        run_full_floquet = vmap(vmap(self.run_one_floquet,
-                                 in_axes=(None, -1), out_axes=-2), # vmap over amps
-                                 in_axes=(-1, -2)  , out_axes=-3) # vmap over freqs
         
-        full_floquet_results = run_full_floquet(self.model.omega_d_values, self.model.drive_amplitudes)  # dim = (num_omega_ds, num_amps, [[hilbert_dim, hilbert_dim], hilbert_dim])
+        # run_full_floquet = vmap(vmap(run_one_floquet_jitted,
+        #                          in_axes=(None, -1), out_axes=-2), # vmap over amps
+        #                          in_axes=(-1, -2)  , out_axes=-3) # vmap over freqs
+        
+        def run_floquet_one_omega(omega, amps_row):
+            run_one_floquet_jitted = jit(self.run_one_floquet)#, static_argnums=(0,))
+            return vmap(lambda amp: run_one_floquet_jitted(omega, amp))(amps_row)
+        
+        full_floquet_results = vmap(run_floquet_one_omega)(self.model.omega_d_values, self.model.drive_amplitudes) # dim = (num_omega_ds, num_amps, [[hilbert_dim, hilbert_dim], hilbert_dim])
+        # full_floquet_results = full_floquet_results.to_jax()
+        full_floquet_modes, full_floquet_energies = dq.to_jax(full_floquet_results[0]), dq.to_jax(full_floquet_results[1])
+        # print(type(full_floquet_modes))
+        full_floquet_results = (full_floquet_modes, full_floquet_energies)
+        # print(full_floquet_results[0].shape)
+        # print(type(self.model.omega_d_values))
+        # full_floquet_results = run_full_floquet(self.model.omega_d_values, self.model.drive_amplitudes)  # dim = (num_omega_ds, num_amps, [[hilbert_dim, hilbert_dim], hilbert_dim])
         
         print('Performing state assignment...')
         freq_amp_shape = self.model.drive_amplitudes.shape
@@ -322,20 +363,32 @@ class FloquetAnalysis(Serializable):
         omega_d_amp_idx_grid = jnp.stack(jnp.meshgrid(omega_d_idxs, amp_idxs), axis=-1)
         omega_d_amp_idx_grid = jnp.transpose(omega_d_amp_idx_grid, (1, 0, 2))
 
-        self.f_modes_tot = jnp.zeros((*freq_amp_shape, self.hilbert_dim, self.hilbert_dim))
+        self.f_modes_tot = jnp.zeros((*freq_amp_shape, self.hilbert_dim, self.hilbert_dim), dtype=np.complex64)
         self.quasienergies_tot =  jnp.zeros(self.f_modes_tot.shape[:-1])
         self.nbars_tot = self.quasienergies_tot.copy() 
 
+        init_f_states = jnp.eye(self.hilbert_dim, dtype=np.complex64)
 
-        init_f_states = jnp.eye(len(self.hilbert_dim))
+        # blais_processing = jtu.Partial(type(self)._postprocess_blais, self,
+        #                                f_modes_energies_arr=full_floquet_results,
+        #                                nbar_for_amp_range=self.nbars_tot, 
+        #                                quasienergies_for_amp_range=self.quasienergies_tot,
+        #                                f_modes_for_amp_range=self.f_modes_tot)
 
-        blais_processing = jtu.Partial(self._postprocess_blais, 
+        blais_processing = jtu.Partial(self._postprocess_blais,
                                        f_modes_energies_arr=full_floquet_results,
                                        nbar_for_amp_range=self.nbars_tot, 
                                        quasienergies_for_amp_range=self.quasienergies_tot,
-                                       floquet_modes_for_amp_range=self.f_modes_tot)
+                                       f_modes_for_amp_range=self.f_modes_tot)
         
-        @jit 
+        # jscan(blais_processing, init_f_states, xs=omega_d_amp_idx_grid[0])
+        
+        # @partial(jit, static_argnums=(0,))
+        # def blais_scan(processing_fn, fixed_freq_idx_array: Array):
+        #     return jscan(processing_fn, init_f_states, xs=fixed_freq_idx_array)
+        
+        # vmap(lambda arr: blais_scan(blais_processing, arr))(omega_d_amp_idx_grid)
+
         def blais_scan(fixed_freq_idx_array: Array):
             return jscan(blais_processing, init_f_states, xs=fixed_freq_idx_array)
         
@@ -346,8 +399,7 @@ class FloquetAnalysis(Serializable):
 
         print('Performing displaced state analysis...')
 
-        disp_state = DisplacedStateFit(hilbert_dim=self.hilbert_dim, model=self.model,
-                                state_indices=self.state_indices, options=self.options)
+        disp_state = DisplacedStateFit(model=self.model, state_indices=self.state_indices, options=self.options)
         
         self.all_intermed_overlaps = jnp.zeros((*freq_amp_shape, len(self.state_indices), self.hilbert_dim)) # dim = (num_omega_ds, num_amps, num_state_indices, hilbert_dim)
 
@@ -365,7 +417,7 @@ class FloquetAnalysis(Serializable):
         omega_d_amp_idx_sets = jnp.stack([jnp.repeat(omega_idx_set[None, :], amp_idx_set.shape[0], axis=0), amp_idx_set], axis=1)
 
         disp_state_processing = jtu.Partial(self._postprocess_disp,
-                                            f_modes_arr=full_floquet_results[0],
+                                            f_modes_arr=full_floquet_modes,
                                             displaced_state=disp_state,
                                             intermed_overlaps=self.all_intermed_overlaps,
                                             )

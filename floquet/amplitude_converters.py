@@ -32,7 +32,7 @@ class ChiacToAmp:
         # 2 pi GHz, while H1 is unitless. Thus chis_for_omega_d has units of
         # 1/(2 pi GHz) so the below has units of 2 pi GHz as required.
         return np.einsum(
-            "a,w->aw", 2.0 * np.sqrt(chi_ac_linspace), 1.0 / np.sqrt(chis_for_omega_d)
+            "a,w->wa", 2.0 * np.sqrt(chi_ac_linspace), 1.0 / np.sqrt(chis_for_omega_d)
         )
 
     def compute_chis_for_omega_d(self) -> np.ndarray:
@@ -102,7 +102,7 @@ class XiSqToAmp:
         drive_matelem = self.H1[idx_0, idx_1]
         omega_01 = self.H0[idx_1, idx_1] - self.H0[idx_0, idx_0]
         return np.einsum(
-            "x,w->xw",
+            "x,w->wx",
             np.sqrt(xi_sq_linspace) / np.abs(drive_matelem),
             np.abs(omega_01**2 - self.omega_d_linspace**2)
             / (2 * self.omega_d_linspace),

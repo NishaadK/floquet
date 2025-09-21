@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=1"
+
 from jax import vmap
 import jax.numpy as jnp
 import dynamiqs as dq
+from qutip import Qobj
+from numpy import ndarray
 
 from jaxtyping import ArrayLike, Array, Complex, Float
 from dynamiqs import QArray, TimeQArray
@@ -37,19 +43,23 @@ class Model(Serializable):
 
     def __init__(
         self,
-        H0: QArray | Array,
-        H1: QArray | Array,
-        omega_d_values: Array | list,
-        drive_amplitudes: Array | list,
+        H0: QArray | Array | Qobj,
+        H1: QArray | Array | Qobj,
+        omega_d_values: Array | list | ndarray,
+        drive_amplitudes: Array | list | ndarray,
     ):
+        if isinstance(H0, Qobj):
+            H0 = H0.full()
+        if isinstance(H1, Qobj):
+            H1 = H1.full()
         if not isinstance(H0, QArray):
             H0 = dq.asqarray(jnp.array(H0, dtype=complex))
         if not isinstance(H1, QArray):
             H1 = dq.asqarray(jnp.array(H1, dtype=complex))
 
-        if isinstance(omega_d_values, list):
+        if isinstance(omega_d_values, (list, ndarray)):
             omega_d_values = jnp.array(omega_d_values)
-        if isinstance(drive_amplitudes, list):
+        if isinstance(drive_amplitudes, (list, ndarray)):
             drive_amplitudes = jnp.array(drive_amplitudes)
         
         # Validate that the omega_d_values is a 1D array

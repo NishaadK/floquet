@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jax.lax import cond as jcond
 
+from functools import partial
+
 import dynamiqs as dq
 from dynamiqs import QArray
 
@@ -71,7 +73,7 @@ class DisplacedState:
         state_indices: List[int] = None, 
         bare_same_override: Bool = False,
     ) -> Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"]:
-        """Construct approximate displaced states, $\left| \tilde{i}(\omega_d, \xi) \right>$.
+        r"""Construct approximate displaced states, $\left| \tilde{i}(\omega_d, \xi) \right>$.
         $$
         \left| \tilde{i}(\omega_d, \xi) \right> = \sum_{j} \left| j \right> \left< j \middle| \tilde{i}(\omega_d, \xi) \right>
         $$
@@ -177,7 +179,7 @@ class DisplacedState:
 
 
     def _create_exponent_pair(self) -> dict:
-        """Create the pair of exponents for the polynomial to be fitted. The polynomial is of the form:
+        r"""Create the pair of exponents for the polynomial to be fitted. The polynomial is of the form:
         $$
             \sum_{\substack{k \ge 0, l>0 \\ k+l \leq \text{cutoff}}} C_{k,l} \omega_d^k \xi^l
         $$
@@ -206,7 +208,7 @@ class DisplacedState:
         sorted_idxs = jnp.argsort(weighted_vals[weighted_vals <= 1.01*self.fit_cutoff])
         return idx_exp_map[sorted_idxs].T # shape = (2,num_fit_terms)
 
-    @jit 
+    @partial(jit, static_argnums=(0,))
     def _bare_coeffs(self) -> Complex[Array, "num_state_indices hilbert_dim num_fit_terms"]:
 
         return jnp.zeros((len(self.state_indices),     
