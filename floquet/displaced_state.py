@@ -241,10 +241,9 @@ class DisplacedStateFit(DisplacedState):
 
             # Get the floquet mode for the state, and subtract off the bare state
             # i.e. only fit the perturbation.
-            state_to_fit = floquet_modes[:, :, array_idx, :]
-            state_to_fit -= np.tile(
+            state_to_fit = floquet_modes[:, :, array_idx, :] - np.tile(
                 self.model.bare_state_array()[None, None, state_idx, :],
-                (state_to_fit.shape[0], state_to_fit.shape[1], 1),
+                (floquet_modes.shape[0], floquet_modes.shape[1], 1),
             )
 
             mask = ovlp_with_bare_states[:, :, array_idx].ravel()

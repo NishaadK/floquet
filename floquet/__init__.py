@@ -1,11 +1,17 @@
 from importlib.metadata import version
 
 from .amplitude_converters import ChiacToAmp as ChiacToAmp, XiSqToAmp as XiSqToAmp
+from .analysis import FloquetResults as FloquetResults
 from .floquet import (
     DisplacedState as DisplacedState,
     DisplacedStateFit as DisplacedStateFit,
     FloquetAnalysis as FloquetAnalysis,
     Model as Model,
+)
+from .model import (
+    DeviceModel as DeviceModel,
+    DriveParameters as DriveParameters,
+    HamiltonianModel as HamiltonianModel,
 )
 from .options import Options as Options
 from .utils.file_io import (

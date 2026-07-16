@@ -73,6 +73,12 @@ class FloquetAnalysis(Serializable):
         self.options = options
         self.init_data_to_save = init_data_to_save
         self.hilbert_dim = model.H0.shape[0]
+        # Per-eigenstate excitation-number weights used for the branch mean
+        # excitation. For a single-mode system this is just 0, 1, 2, ...; for a
+        # multimode system (e.g. coupled LINC + transmon) the model can supply a
+        # vector giving the total quanta of each dressed eigenstate (see
+        # DeviceModel.excitation_numbers). Falls back to the index ordering.
+        self.excitation_numbers = getattr(model, "excitation_numbers", None)
 
     def __str__(self) -> str:
         return "Running floquet simulation with parameters: \n" + super().__str__()
@@ -185,8 +191,15 @@ class FloquetAnalysis(Serializable):
         """
         bare_states = self.model.bare_state_array()
         overlaps_sq = np.abs(np.einsum("ij,kj->ik", bare_states, f_modes_ordered)) ** 2
-        # sum over bare excitations weighted by excitation number
-        return np.einsum("ik,i->k", overlaps_sq, np.arange(0, self.hilbert_dim))
+        # sum over bare excitations weighted by excitation number. For a multimode
+        # system the weight of each dressed eigenstate is its total quanta (supplied
+        # by the model); otherwise default to the index ordering 0, 1, 2, ...
+        weights = (
+            self.excitation_numbers
+            if self.excitation_numbers is not None
+            else np.arange(0, self.hilbert_dim)
+        )
+        return np.einsum("ik,i->k", overlaps_sq, weights)
 
     def run(self, filepath: str | None = None) -> dict:
         """Perform floquet analysis over range of amplitudes and drive frequencies.
@@ -217,6 +230,19 @@ class FloquetAnalysis(Serializable):
         """
         print(self)
         start_time = time.time()
+
+        # Single persistent progress bar for the whole run; per-range status and
+        # checkpoint-save messages are folded into its description/postfix rather
+        # than printed as separate lines.
+        try:
+            from tqdm.auto import tqdm
+
+            total_points = len(self.model.omega_d_values) * len(
+                self.model.drive_amplitudes
+            )
+            progress_bar = tqdm(total=total_points, desc="Floquet analysis")
+        except ImportError:
+            progress_bar = None
 
         # initialize all arrays that will contain our data
         array_shape = (
@@ -267,19 +293,27 @@ class FloquetAnalysis(Serializable):
             np.floor(len(self.model.drive_amplitudes) / num_fit_ranges)
         )
         for amp_range_idx in range(num_fit_ranges):
-            print(f"calculating for amp_range_idx={amp_range_idx}")
             # edge case if range doesn't fit in neatly
             if amp_range_idx == num_fit_ranges - 1:
                 amp_range_idx_final = len(self.model.drive_amplitudes)
             else:
                 amp_range_idx_final = (amp_range_idx + 1) * num_amp_pts_per_range
             amp_idxs = [amp_range_idx * num_amp_pts_per_range, amp_range_idx_final]
+            if progress_bar is not None:
+                progress_bar.set_description(
+                    f"Floquet analysis | amp range {amp_range_idx + 1}"
+                    f"/{num_fit_ranges} (cols {amp_idxs[0]}-{amp_idxs[1]})"
+                )
             # now perform floquet mode calculation for amp_range_idx
             # need to pass forward the floquet modes from the previous amp range
             # which allow us to identify floquet modes that may have been displaced
             # far from the origin
             output = self._floquet_main_for_amp_range(
-                amp_idxs, displaced_state, previous_coefficients, prev_f_modes_arr
+                amp_idxs,
+                displaced_state,
+                previous_coefficients,
+                prev_f_modes_arr,
+                progress_bar=progress_bar,
             )
             (
                 bare_state_overlaps_for_range,
@@ -324,6 +358,26 @@ class FloquetAnalysis(Serializable):
                 amp_idxs, overlaps, intermediate_displaced_state_overlaps
             )
             previous_coefficients = new_coefficients
+            # Checkpoint after each amplitude range so a long sweep that errors out
+            # partway still leaves the completed amplitude columns recoverable. The
+            # write is atomic (temp file + os.replace) so the target file is never
+            # left half-written / corrupted.
+            if filepath is not None:
+                self._write_checkpoint(
+                    filepath,
+                    n_amp_completed=amp_idxs[1],
+                    partial_data={
+                        "bare_state_overlaps": bare_state_overlaps,
+                        "quasienergies": quasienergies,
+                        "avg_excitation": avg_excitation,
+                        "intermediate_displaced_state_overlaps": intermediate_displaced_state_overlaps,  # noqa E501
+                    },
+                )
+                total_amps = len(self.model.drive_amplitudes)
+                if progress_bar is not None:
+                    progress_bar.set_postfix_str(
+                        f"saved {amp_idxs[1]}/{total_amps} amp cols"
+                    )
         # The previously extracted coefficients were valid for the amplitude ranges
         # we asked for the fit over. Now armed with with correctly identified floquet
         # modes, we recompute these coefficients over the whole sea of floquet mode data
@@ -351,6 +405,8 @@ class FloquetAnalysis(Serializable):
         }
         if self.options.save_floquet_modes:
             data_dict["floquet_modes"] = floquet_modes
+        if progress_bar is not None:
+            progress_bar.close()
         print(f"finished in {(time.time() - start_time) / 60} minutes")
         if filepath is not None:
             self.write_to_file(filepath, data_dict)
@@ -363,12 +419,34 @@ class FloquetAnalysis(Serializable):
         overall_array[:, amp_idxs[0] : amp_idxs[1]] = array_for_range
         return overall_array
 
+    def _write_checkpoint(
+        self, filepath: str, n_amp_completed: int, partial_data: dict
+    ) -> None:
+        """Atomically write a partial-result checkpoint to ``filepath``.
+
+        Writes to a temporary file and then os.replace()s it onto the target, so
+        the destination is never left half-written if the process dies during the
+        write. ``n_amp_completed`` records how many drive-amplitude columns are
+        valid (data at indices ``[:, :n_amp_completed]`` is filled; the rest is
+        still zero). The final ``write_to_file`` at the end of ``run`` overwrites
+        this with the complete dataset.
+        """
+        import os
+
+        data = dict(partial_data)
+        data["n_amp_completed"] = int(n_amp_completed)
+        data["is_checkpoint"] = True
+        tmp = f"{filepath}.ckpt.tmp"
+        self.write_to_file(tmp, data)
+        os.replace(tmp, filepath)
+
     def _floquet_main_for_amp_range(
         self,
         amp_idxs: list,
         displaced_state: DisplacedState,
         previous_coefficients: np.ndarray,
         prev_f_modes_arr: np.ndarray,
+        progress_bar=None,
     ) -> tuple:
         """Run the floquet simulation over a specific amplitude range."""
         amp_range_vals = self.model.drive_amplitudes[amp_idxs[0] : amp_idxs[1]]
@@ -413,6 +491,8 @@ class FloquetAnalysis(Serializable):
                 self.options.num_cpus,
                 _run_floquet_and_calculate,
                 self.model.omega_d_values,
+                progress_bar=progress_bar,
+                advance_per_item=amp_idxs[1] - amp_idxs[0],
             )
         )
         (
